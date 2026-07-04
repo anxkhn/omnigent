@@ -11,6 +11,8 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, TypeVar
 
+import httpx
+
 from omnigent.llms._responses_to_chat import (
     chat_response_to_response,
     chat_stream_to_response_events,
@@ -18,6 +20,7 @@ from omnigent.llms._responses_to_chat import (
 )
 from omnigent.llms._usage_observer import notify as _notify_usage
 from omnigent.llms.adapters import get_adapter
+from omnigent.llms.adapters.base import BaseAdapter
 from omnigent.llms.adapters.openai import OpenAIAdapter
 from omnigent.llms.errors import (
     PermanentLLMError,
@@ -31,7 +34,9 @@ from omnigent.llms.types import (
 )
 from omnigent.reasoning_effort import (
     OPENAI_EFFORTS,
-    provider_accepts_reasoning_effort,
+    is_unsupported_reasoning_effort_error,
+    record_reasoning_effort_rejection,
+    should_send_reasoning_effort,
     validate_effort_or_llm_error,
 )
 from omnigent.runtime.llm_retry import classify_llm_error
@@ -229,16 +234,17 @@ class _ResponsesNamespace:
                     "type": "json_schema",
                     "json_schema": {k: v for k, v in fmt.items() if k != "type"},
                 }
-        if reasoning and provider_accepts_reasoning_effort(routed.provider, routed.model):
-            extra["reasoning_effort"] = reasoning.get("effort")
 
         if stream:
-            chunks = await adapter.chat_completions(
-                messages,
-                routed.model,
-                tools,
-                True,
-                extra,
+            chunks = await self._chat_completions_with_reasoning_fallback(
+                adapter=adapter,
+                messages=messages,
+                provider=routed.provider,
+                model=routed.model,
+                tools=tools,
+                stream=True,
+                base_extra=extra,
+                reasoning=reasoning,
                 connection_params=connection_params,
                 timeout=timeout,
             )
@@ -248,17 +254,170 @@ class _ResponsesNamespace:
                 model=routed.model,
             )
 
-        result = await adapter.chat_completions(
-            messages,
-            routed.model,
-            tools,
-            False,
-            extra,
+        result = await self._chat_completions_with_reasoning_fallback(
+            adapter=adapter,
+            messages=messages,
+            provider=routed.provider,
+            model=routed.model,
+            tools=tools,
+            stream=False,
+            base_extra=extra,
+            reasoning=reasoning,
             connection_params=connection_params,
             timeout=timeout,
         )
         assert isinstance(result, dict)
         return chat_response_to_response(result)
+
+    async def _chat_completions_with_reasoning_fallback(
+        self,
+        *,
+        adapter: BaseAdapter,
+        messages: list[dict[str, Any]],
+        provider: str,
+        model: str,
+        tools: list[dict[str, Any]] | None,
+        stream: bool,
+        base_extra: dict[str, Any],
+        reasoning: dict[str, str] | None,
+        connection_params: dict[str, str] | None,
+        timeout: int | None,
+    ) -> dict[str, Any] | AsyncIterator[dict[str, Any]]:
+        """
+        Call the adapter's Chat Completions, self-healing an xAI-style
+        ``reasoning_effort`` rejection.
+
+        ``reasoning_effort`` is sent optimistically unless the model is
+        already known to reject it (seed set or a rejection learned earlier
+        this process). If the provider answers HTTP 400 *naming* the
+        parameter, it is stripped, the call is retried once, and the
+        ``(provider, model)`` pair is remembered so later calls skip it. A
+        parameter rejection is deterministic, not transient, so this single
+        retry lives here — inline, one attempt, outside the backoff loop in
+        :func:`_execute_with_retry`.
+
+        For streaming, the returned iterator is primed (its first chunk is
+        pulled) so an immediate 400 surfaces here where it can be retried,
+        instead of failing deep inside the stream consumer.
+
+        :param adapter: The resolved provider adapter.
+        :param messages: Chat Completions messages.
+        :param provider: Routed provider id, e.g. ``"xai"``.
+        :param model: Model name without prefix, e.g. ``"grok-4"``.
+        :param tools: Tool schemas or ``None``.
+        :param stream: Enable streaming.
+        :param base_extra: Extra kwargs *without* ``reasoning_effort``.
+        :param reasoning: Reasoning config or ``None``.
+        :param connection_params: Connection overrides or ``None``.
+        :param timeout: Timeout in seconds or ``None``.
+        :returns: Response dict (non-streaming) or a primed chunk iterator.
+        """
+        send_effort = bool(reasoning) and should_send_reasoning_effort(provider, model)
+
+        async def _call(
+            with_effort: bool,
+        ) -> dict[str, Any] | AsyncIterator[dict[str, Any]]:
+            """
+            Perform one adapter call, optionally including
+            ``reasoning_effort``.
+
+            :param with_effort: Whether to send ``reasoning_effort``.
+            :returns: Response dict or primed chunk iterator.
+            """
+            extra = dict(base_extra)
+            if with_effort and reasoning is not None:
+                extra["reasoning_effort"] = reasoning.get("effort")
+            result = await adapter.chat_completions(
+                messages,
+                model,
+                tools,
+                stream,
+                extra,
+                connection_params=connection_params,
+                timeout=timeout,
+            )
+            if stream:
+                assert not isinstance(result, dict)
+                return await _prime_stream(result)
+            return result
+
+        try:
+            return await _call(send_effort)
+        except httpx.HTTPStatusError as exc:
+            if not send_effort or not is_unsupported_reasoning_effort_error(
+                exc.response.status_code,
+                _safe_error_body(exc.response),
+            ):
+                raise
+            record_reasoning_effort_rejection(provider, model)
+            _logger.warning(
+                "reasoning_effort rejected by %s/%s (HTTP 400); retrying once "
+                "without it and skipping it for this model for the rest of the "
+                "process",
+                provider,
+                model,
+            )
+            return await _call(False)
+
+
+def _safe_error_body(response: httpx.Response) -> str:
+    """
+    Read an error response body without raising.
+
+    :param response: The httpx response carried by an
+        ``HTTPStatusError``. Streaming 4xx bodies are already read by
+        the adapter before ``raise_for_status``, so ``.text`` is
+        available here.
+    :returns: The body text, or ``""`` if it cannot be read.
+    """
+    try:
+        return response.text
+    except Exception:
+        return ""
+
+
+async def _prime_stream(
+    chunks: AsyncIterator[dict[str, Any]],
+) -> AsyncIterator[dict[str, Any]]:
+    """
+    Pull the first chunk of *chunks* eagerly, returning an iterator
+    that re-yields it followed by the rest.
+
+    Forces the underlying HTTP request to start so an immediate error
+    (e.g. an unsupported-parameter 400) is raised by *this* coroutine —
+    where the caller can catch and retry it — rather than surfacing
+    lazily inside the stream consumer.
+
+    :param chunks: The raw Chat Completions chunk iterator.
+    :returns: An equivalent iterator whose first chunk is buffered.
+    """
+    iterator = chunks.__aiter__()
+    try:
+        first = await iterator.__anext__()
+    except StopAsyncIteration:
+        return _empty_stream()
+    return _chain_first(first, iterator)
+
+
+async def _empty_stream() -> AsyncIterator[dict[str, Any]]:
+    """Yield nothing — used when a primed stream had no chunks."""
+    return
+    yield  # pragma: no cover — marks this as an async generator
+
+
+async def _chain_first(
+    first: dict[str, Any],
+    rest: AsyncIterator[dict[str, Any]],
+) -> AsyncIterator[dict[str, Any]]:
+    """
+    Re-yield the buffered *first* chunk, then drain *rest*.
+
+    :param first: The chunk already pulled by :func:`_prime_stream`.
+    :param rest: The remaining chunk iterator.
+    """
+    yield first
+    async for chunk in rest:
+        yield chunk
 
 
 async def _execute_with_retry(

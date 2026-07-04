@@ -10,12 +10,14 @@ methods are async.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
+import respx
 
 from omnigent.llms.client import Client
 from omnigent.llms.errors import (
@@ -28,6 +30,12 @@ from omnigent.llms.types import (
     MessageOutput,
     OutputText,
     Response,
+    ResponseCompletedEvent,
+    ResponseTextDeltaEvent,
+)
+from omnigent.reasoning_effort import (
+    reset_reasoning_effort_rejections,
+    should_send_reasoning_effort,
 )
 from omnigent.spec.types import RetryPolicy
 
@@ -972,15 +980,15 @@ async def _capture_reasoning_effort(
 async def test_reasoning_effort_dropped_for_unsupported_xai_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """xAI rejects ``reasoning_effort`` on models like ``grok-4`` with HTTP 400.
+    """A seed-listed unsupported xAI model (``grok-4``) never sends the param.
 
-    The Chat Completions path must NOT forward ``reasoning_effort`` for an xAI
-    model outside the supported allow-set, otherwise every reasoning-configured
-    ``grok-4`` / ``grok-code-fast-1`` / ``grok-4-fast-reasoning`` call 400s.
+    ``grok-4`` is in the known-unsupported seed set, so the Chat Completions path
+    must skip ``reasoning_effort`` up front (no wasted round trip) rather than
+    sending it and self-healing the 400.
     """
     extra = await _capture_reasoning_effort(monkeypatch, provider="xai", model="grok-4")
     assert "reasoning_effort" not in extra, (
-        f"reasoning_effort leaked to an unsupported xAI model: {extra!r}"
+        f"reasoning_effort leaked to a seed-listed xAI model: {extra!r}"
     )
 
 
@@ -1004,3 +1012,364 @@ async def test_reasoning_effort_unchanged_for_non_xai_provider(
     assert extra.get("reasoning_effort") == "high", (
         f"reasoning_effort should pass through for non-xAI providers, got {extra!r}"
     )
+
+
+# ── reasoning_effort self-healing 400 fallback (xAI / Grok) ──────────
+
+
+@pytest.fixture(autouse=True)
+def _reset_reasoning_effort_cache() -> Iterator[None]:
+    """Isolate the process-wide learned-rejection cache between tests."""
+    reset_reasoning_effort_rejections()
+    yield
+    reset_reasoning_effort_rejections()
+
+
+# xAI's real 400 body for an unsupported reasoning-effort model. Note the
+# camel-cased ``reasoningEffort`` (see the lobehub / grok-cli reports).
+_XAI_UNSUPPORTED_BODY = (
+    '{"error": "Model grok-4-1-fast does not support parameter reasoningEffort."}'
+)
+
+
+def _make_400(body: str) -> httpx.HTTPStatusError:
+    """Build an ``httpx.HTTPStatusError`` carrying *body* as a 400 response."""
+    request = httpx.Request("POST", "http://test")
+    response = httpx.Response(400, content=body.encode(), request=request)
+    return httpx.HTTPStatusError("bad request", request=request, response=response)
+
+
+class _ReasoningEffort400Adapter:
+    """Adapter that 400s while ``reasoning_effort`` is present, then succeeds.
+
+    Records every call's ``extra`` dict so tests can assert the parameter was
+    sent on the first attempt and stripped on the retry. Supports both the
+    non-streaming and streaming (lazy first-chunk error) shapes.
+
+    :param stream_mode: When ``True``, model the streaming path where the 400
+        surfaces lazily on the first chunk (as the real adapter does).
+    :param body: The 400 response body to raise.
+    """
+
+    def __init__(self, *, stream_mode: bool = False, body: str = _XAI_UNSUPPORTED_BODY) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._stream_mode = stream_mode
+        self._body = body
+
+    async def chat_completions(
+        self,
+        messages: Any,
+        model: str,
+        tools: Any,
+        stream: bool,
+        extra: dict[str, Any],
+        **kwargs: Any,
+    ) -> Any:
+        """Record *extra*; 400 when the param is present, else succeed."""
+        self.calls.append(dict(extra))
+        has_effort = "reasoning_effort" in extra
+        if stream:
+            if has_effort:
+                return self._raising_stream()
+            return self._ok_stream(model)
+        if has_effort:
+            raise _make_400(self._body)
+        return {"choices": [{"message": {"content": "ok"}}], "model": model}
+
+    async def _raising_stream(self) -> Any:
+        """A stream whose first ``__anext__`` raises the 400 (lazy error)."""
+        raise _make_400(self._body)
+        yield  # pragma: no cover — marks this as an async generator
+
+    async def _ok_stream(self, model: str) -> Any:
+        """A minimal successful stream yielding one text token."""
+        yield {"choices": [{"delta": {"content": "Hello"}}], "model": model}
+        yield {"choices": [{"delta": {}, "finish_reason": "stop"}], "model": model}
+
+
+def _route_to_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: Any,
+    *,
+    provider: str,
+    model: str,
+) -> None:
+    """Route ``Client().responses.create`` through *adapter* for provider/model."""
+    from omnigent.llms.routing import RoutedModel
+
+    routed = RoutedModel(provider=provider, model=model)
+    monkeypatch.setattr("omnigent.llms.client.parse_model_string", lambda model: routed)
+    monkeypatch.setattr("omnigent.llms.client.get_adapter", lambda provider: adapter)
+    monkeypatch.setattr(
+        "omnigent.llms.client.responses_input_to_chat_messages",
+        lambda input, instructions: [{"role": "user", "content": "test"}],
+    )
+    monkeypatch.setattr(
+        "omnigent.llms.client.chat_response_to_response",
+        lambda result: _make_response(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_optimistic_for_unknown_xai_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Grok id not in the seed set is sent the param optimistically.
+
+    The whole point of self-healing: a newly released reasoning-capable model is
+    never silently denied ``reasoning_effort`` by a stale allow-list.
+    """
+    extra = await _capture_reasoning_effort(monkeypatch, provider="xai", model="grok-9-brand-new")
+    assert extra.get("reasoning_effort") == "high", (
+        f"reasoning_effort should be sent optimistically to unknown models, got {extra!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_self_heals_on_400(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported model not in the seed set 400s, then succeeds stripped.
+
+    First attempt sends ``reasoning_effort`` and gets a 400 naming the param;
+    the client strips it, retries once, and returns a valid response. The
+    ``(provider, model)`` pair is then remembered for the process.
+    """
+    adapter = _ReasoningEffort400Adapter()
+    _route_to_adapter(monkeypatch, adapter, provider="xai", model="grok-4-1-fast")
+
+    result = await Client().responses.create(
+        input=[{"role": "user", "content": "test"}],
+        model="xai/grok-4-1-fast",
+        reasoning={"effort": "high"},
+    )
+
+    assert isinstance(result, Response)
+    # Two calls: the first with the param (rejected), the retry without it.
+    assert len(adapter.calls) == 2, f"Expected 2 calls, got {adapter.calls!r}"
+    assert adapter.calls[0].get("reasoning_effort") == "high"
+    assert "reasoning_effort" not in adapter.calls[1]
+    # The rejection is remembered so later calls skip the wasted round trip.
+    assert should_send_reasoning_effort("xai", "grok-4-1-fast") is False
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_cached_rejection_skips_param(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After one rejection, the next call for the same model omits the param."""
+    adapter = _ReasoningEffort400Adapter()
+    _route_to_adapter(monkeypatch, adapter, provider="xai", model="grok-4-1-fast")
+
+    # First create() self-heals and records the rejection.
+    await Client().responses.create(
+        input=[{"role": "user", "content": "test"}],
+        model="xai/grok-4-1-fast",
+        reasoning={"effort": "high"},
+    )
+    adapter.calls.clear()
+
+    # Second create() must send exactly one call, without the param.
+    await Client().responses.create(
+        input=[{"role": "user", "content": "test"}],
+        model="xai/grok-4-1-fast",
+        reasoning={"effort": "high"},
+    )
+    assert len(adapter.calls) == 1, f"Expected 1 call after caching, got {adapter.calls!r}"
+    assert "reasoning_effort" not in adapter.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_self_heals_on_400_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The streaming path self-heals a lazy first-chunk 400 via stream priming."""
+    adapter = _ReasoningEffort400Adapter(stream_mode=True)
+    _route_to_adapter(monkeypatch, adapter, provider="xai", model="grok-4-1-fast")
+
+    stream = await Client().responses.create(
+        input=[{"role": "user", "content": "test"}],
+        model="xai/grok-4-1-fast",
+        reasoning={"effort": "high"},
+        stream=True,
+    )
+
+    events = [event async for event in stream]  # type: ignore[union-attr]
+
+    # The stream completed (the retry without the param succeeded).
+    assert any(type(e).__name__ == "ResponseCompletedEvent" for e in events), (
+        f"stream did not complete after self-heal: {[type(e).__name__ for e in events]}"
+    )
+    assert len(adapter.calls) == 2, f"Expected 2 calls, got {adapter.calls!r}"
+    assert adapter.calls[0].get("reasoning_effort") == "high"
+    assert "reasoning_effort" not in adapter.calls[1]
+
+
+@pytest.mark.asyncio
+async def test_non_reasoning_400_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generic 400 that doesn't name the param propagates without a retry."""
+    adapter = _ReasoningEffort400Adapter(
+        body="invalid request: missing required 'model' field",
+    )
+    _route_to_adapter(monkeypatch, adapter, provider="xai", model="grok-4-1-fast")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await Client().responses.create(
+            input=[{"role": "user", "content": "test"}],
+            model="xai/grok-4-1-fast",
+            reasoning={"effort": "high"},
+        )
+
+    # Only one call — the fallback must NOT fire for an unrelated 400.
+    assert len(adapter.calls) == 1, f"Expected 1 call, got {adapter.calls!r}"
+    assert should_send_reasoning_effort("xai", "grok-4-1-fast") is True
+
+
+# ── reasoning_effort against the live xAI Chat Completions endpoint ──
+
+
+_XAI_CHAT_URL = "https://api.x.ai/v1/chat/completions"
+
+
+def _xai_ok(model: str, text: str = "hi there") -> httpx.Response:
+    """Build a non-streaming Chat Completions 200 for *model*."""
+    return httpx.Response(
+        200,
+        json={
+            "model": model,
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        },
+    )
+
+
+def _xai_effort_400(model: str) -> httpx.Response:
+    """Build the xAI 400 for an unsupported ``reasoning_effort`` on *model*."""
+    return httpx.Response(
+        400,
+        json={"error": f"Model {model} does not support parameter reasoningEffort."},
+    )
+
+
+def _xai_ok_stream(model: str, text: str = "hi there") -> httpx.Response:
+    """Build a streaming Chat Completions 200 (SSE) for *model*."""
+    body = (
+        f'data: {{"model": "{model}", "choices": '
+        f'[{{"delta": {{"content": "{text}"}}}}]}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    return httpx.Response(200, text=body)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_reasoning_effort_self_heal_against_xai_endpoint() -> None:
+    """An unknown unsupported Grok id 400s once, then succeeds stripped.
+
+    Drives the real routing and OpenAI-compatible adapter down to the HTTP
+    boundary: the first request carries ``reasoning_effort`` and gets the xAI
+    400, the second is retried without it and succeeds.
+    """
+    route = respx.post(_XAI_CHAT_URL).mock(
+        side_effect=[
+            _xai_effort_400("grok-4-1-fast"),
+            _xai_ok("grok-4-1-fast"),
+        ]
+    )
+
+    result = await Client().responses.create(
+        input=[{"role": "user", "content": "hi"}],
+        model="xai/grok-4-1-fast",
+        reasoning={"effort": "high"},
+        connection_params={"api_key": "test-key"},
+    )
+
+    assert isinstance(result, Response)
+    assert result.output[0].content[0].text == "hi there"
+    assert route.call_count == 2
+
+    first = json.loads(route.calls[0].request.content)
+    second = json.loads(route.calls[1].request.content)
+    assert first.get("reasoning_effort") == "high"
+    assert first["model"] == "grok-4-1-fast"
+    assert "reasoning_effort" not in second
+    # The rejection is remembered for the rest of the process.
+    assert should_send_reasoning_effort("xai", "grok-4-1-fast") is False
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_reasoning_effort_forwarded_to_supported_model_endpoint() -> None:
+    """A supported model (``grok-4.3``) sends the param and succeeds first try."""
+    route = respx.post(_XAI_CHAT_URL).mock(return_value=_xai_ok("grok-4.3"))
+
+    result = await Client().responses.create(
+        input=[{"role": "user", "content": "hi"}],
+        model="xai/grok-4.3",
+        reasoning={"effort": "high"},
+        connection_params={"api_key": "test-key"},
+    )
+
+    assert isinstance(result, Response)
+    assert route.call_count == 1
+    body = json.loads(route.calls[0].request.content)
+    assert body.get("reasoning_effort") == "high"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_reasoning_effort_skipped_for_seed_listed_model_endpoint() -> None:
+    """A seed-listed model (``grok-4``) never puts the param on the wire."""
+    route = respx.post(_XAI_CHAT_URL).mock(return_value=_xai_ok("grok-4"))
+
+    result = await Client().responses.create(
+        input=[{"role": "user", "content": "hi"}],
+        model="xai/grok-4",
+        reasoning={"effort": "high"},
+        connection_params={"api_key": "test-key"},
+    )
+
+    assert isinstance(result, Response)
+    assert route.call_count == 1
+    body = json.loads(route.calls[0].request.content)
+    assert "reasoning_effort" not in body
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_reasoning_effort_self_heal_streaming_against_xai_endpoint() -> None:
+    """Streaming self-heals the xAI 400 and completes on the stripped retry."""
+    model = "grok-4.20-0309-reasoning"
+    route = respx.post(_XAI_CHAT_URL).mock(
+        side_effect=[
+            _xai_effort_400(model),
+            _xai_ok_stream(model),
+        ]
+    )
+
+    stream = await Client().responses.create(
+        input=[{"role": "user", "content": "hi"}],
+        model=f"xai/{model}",
+        reasoning={"effort": "high"},
+        connection_params={"api_key": "test-key"},
+        stream=True,
+    )
+    events = [event async for event in stream]  # type: ignore[union-attr]
+
+    text = "".join(e.delta for e in events if isinstance(e, ResponseTextDeltaEvent))
+    assert text == "hi there"
+    assert any(isinstance(e, ResponseCompletedEvent) for e in events)
+    assert route.call_count == 2
+
+    first = json.loads(route.calls[0].request.content)
+    second = json.loads(route.calls[1].request.content)
+    assert first.get("reasoning_effort") == "high"
+    assert first["model"] == model
+    assert "reasoning_effort" not in second
