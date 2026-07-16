@@ -474,12 +474,7 @@ name: my_agent
 prompt: You are a helpful data analyst.
 
 executor:
-  harness: claude-sdk          # or: claude-native, codex, codex-native, cursor,
-                               # cursor-native, antigravity, antigravity-native,
-                               # copilot, goose, goose-native, hermes,
-                               # hermes-native, kimi, kimi-native, kiro-native,
-                               # opencode, openai-agents, pi, pi-native, qwen,
-                               # qwen-native
+  harness: claude-sdk          # See docs/AGENT_YAML_SPEC.md for available harnesses.
 
 tools:
   # A local Python function (schema auto-generated from the signature)
