@@ -24,13 +24,15 @@ impl ProcSpec {
         ]
     }
 
-    /// `uv run omnigent --log-to-stderr server --host 127.0.0.1 --port <p>
+    /// `uv run --python 3.12 omnigent --log-to-stderr server --host 127.0.0.1 --port <p>
     /// --database-uri <db> --artifact-location <dir>`, from the repo root.
     pub fn server(pod: &Pod) -> ProcSpec {
         ProcSpec {
             program: "uv".into(),
             args: vec![
                 "run".into(),
+                "--python".into(),
+                "3.12".into(),
                 "omnigent".into(),
                 "--log-to-stderr".into(),
                 "server".into(),
@@ -48,13 +50,15 @@ impl ProcSpec {
         }
     }
 
-    /// `uv run omnigent --log-to-stderr host --server http://127.0.0.1:<p>`,
+    /// `uv run --python 3.12 omnigent --log-to-stderr host --server http://127.0.0.1:<p>`,
     /// from the repo root.
     pub fn host(pod: &Pod) -> ProcSpec {
         ProcSpec {
             program: "uv".into(),
             args: vec![
                 "run".into(),
+                "--python".into(),
+                "3.12".into(),
                 "omnigent".into(),
                 "--log-to-stderr".into(),
                 "host".into(),
@@ -142,6 +146,14 @@ mod tests {
         .unwrap();
 
         for spec in [ProcSpec::server(&pod), ProcSpec::host(&pod)] {
+            assert_eq!(
+                spec.args
+                    .iter()
+                    .take(4)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                vec!["run", "--python", "3.12", "omnigent"]
+            );
             assert!(
                 spec.args.iter().any(|arg| arg == "--log-to-stderr"),
                 "omnigent command should request stderr logging: {:?}",
