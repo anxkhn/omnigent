@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crate::install::PYTHON_VERSION;
 use crate::pod::Pod;
 
 /// A resolved command line + working dir for one process. Env is applied by the
@@ -24,7 +25,7 @@ impl ProcSpec {
         ]
     }
 
-    /// `uv run --python 3.12 omnigent --log-to-stderr server --host 127.0.0.1 --port <p>
+    /// `uv run --python <pinned> omnigent --log-to-stderr server --host 127.0.0.1 --port <p>
     /// --database-uri <db> --artifact-location <dir>`, from the repo root.
     pub fn server(pod: &Pod) -> ProcSpec {
         ProcSpec {
@@ -32,7 +33,7 @@ impl ProcSpec {
             args: vec![
                 "run".into(),
                 "--python".into(),
-                "3.12".into(),
+                PYTHON_VERSION.into(),
                 "omnigent".into(),
                 "--log-to-stderr".into(),
                 "server".into(),
@@ -50,7 +51,7 @@ impl ProcSpec {
         }
     }
 
-    /// `uv run --python 3.12 omnigent --log-to-stderr host --server http://127.0.0.1:<p>`,
+    /// `uv run --python <pinned> omnigent --log-to-stderr host --server http://127.0.0.1:<p>`,
     /// from the repo root.
     pub fn host(pod: &Pod) -> ProcSpec {
         ProcSpec {
@@ -58,7 +59,7 @@ impl ProcSpec {
             args: vec![
                 "run".into(),
                 "--python".into(),
-                "3.12".into(),
+                PYTHON_VERSION.into(),
                 "omnigent".into(),
                 "--log-to-stderr".into(),
                 "host".into(),
@@ -152,7 +153,7 @@ mod tests {
                     .take(4)
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
-                vec!["run", "--python", "3.12", "omnigent"]
+                vec!["run", "--python", PYTHON_VERSION, "omnigent"]
             );
             assert!(
                 spec.args.iter().any(|arg| arg == "--log-to-stderr"),
