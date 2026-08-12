@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from typing import Any
 
 import httpx
@@ -17,24 +19,38 @@ class _RecordingServerClient:
 
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict[str, Any]]] = []
+        self.hook_response: dict[str, Any] | None = None
 
     async def post(self, url: str, *, json: dict[str, Any]) -> httpx.Response:
         self.posts.append((url, json))
-        return httpx.Response(200, request=httpx.Request("POST", url))
+        request = httpx.Request("POST", url)
+        if url.endswith("/hooks/native-permission-request") and self.hook_response is not None:
+            return httpx.Response(200, json=self.hook_response, request=request)
+        return httpx.Response(200, request=request)
 
 
 class _FakeOpenCodeClient:
-    """Fake OpenCode client recording permission replies + history."""
+    """Fake OpenCode client recording permission and question replies + history."""
 
     def __init__(self) -> None:
         self.replies: list[tuple[str, dict[str, Any]]] = []
         self.messages: list[dict[str, Any]] = []
+        self.question_replies: list[tuple[str, list[Any]]] = []
+        self.question_rejects: list[str] = []
 
     async def list_messages(self, session_id: str) -> list[dict[str, Any]]:
         return self.messages
 
     async def reply_permission(self, request_id: str, reply: dict[str, Any]) -> bool:
         self.replies.append((request_id, reply))
+        return True
+
+    async def reply_question(self, request_id: str, answers: list[Any]) -> bool:
+        self.question_replies.append((request_id, answers))
+        return True
+
+    async def reject_question(self, request_id: str) -> bool:
+        self.question_rejects.append(request_id)
         return True
 
 
