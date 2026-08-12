@@ -391,6 +391,7 @@ async def _drive_mcp_server(base_url: str, session_id: str) -> None:
 
             # Add an MCP server.
             await page.get_by_test_id("create-agent-add-mcp").click()
+            await page.get_by_test_id("create-agent-add-custom-mcp").click()
 
             # An MCP entry card should appear.
             mcp_entry = page.get_by_test_id("create-agent-mcp-entry")
