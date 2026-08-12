@@ -1034,7 +1034,6 @@ class OpenCodeNativeForwarder:
             return self._default_decision
         return map_verdict_to_decision(verdict)
 
-
     async def _on_question_asked(self, event: OpenCodeEvent) -> None:
         """Handle ``question.asked`` — surface opencode's blocking ``question``.
 
