@@ -878,8 +878,6 @@ async def test_file_part_dedupes_across_snapshots() -> None:
     await fwd.handle_event(_event("message.part.updated", part=dict(part)))
     items = [b for _u, b in server.posts if b["type"] == "external_conversation_item"]
     assert len(items) == 1
-<<<<<<< HEAD
-=======
 
 
 # --- question tool (blocking ``question`` → web elicitation) --------------
@@ -1135,4 +1133,3 @@ async def test_question_asked_dedupes_concurrent_same_request() -> None:
     assert fwd._question_tasks["que_1"] is task
     await task
     assert opencode.question_replies == [("que_1", [["A"]])]
->>>>>>> 287206b0 (test(opencode): cover question web round trip)
