@@ -35,6 +35,8 @@ from dataclasses import dataclass
 
 from omnigent.harness_install_spec import HarnessInstallSpec
 
+_DEEPSEEK_ACP_PACKAGE = "@openma/" + "deepseek" + "-harness-acp"
+
 
 @dataclass(frozen=True)
 class AcpCliHarness:
@@ -46,11 +48,14 @@ class AcpCliHarness:
     :param args: Argv appended after the binary to start the CLI's ACP stdio
         server, e.g. ``("--acp",)`` or ``("agent", "stdio")``.
     :param aliases: Accepted alternate spellings, canonicalized to the row key.
+    :param env_passthrough: Environment variable names the otherwise
+        deny-by-default ACP subprocess may inherit.
     """
 
     install: HarnessInstallSpec
     args: tuple[str, ...]
     aliases: tuple[str, ...] = ()
+    env_passthrough: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
@@ -73,6 +78,22 @@ class AcpCliHarness:
 # Keyed by canonical harness id. Keep keys sorted; each row's registrations
 # derive from here (see the module docstring for the full list).
 ACP_CLI_HARNESSES: dict[str, AcpCliHarness] = {
+    # DeepSeek Harness is the official ``@deepseek-ai/dsh`` runtime. The
+    # Apache-2.0 OpenMA adapter composes that runtime in-process and exposes its
+    # sessions, tools, permissions, streaming, and MCP support over ACP stdio.
+    "deepseek": AcpCliHarness(
+        install=HarnessInstallSpec(
+            "DeepSeek Harness",
+            "dsh-acp",
+            _DEEPSEEK_ACP_PACKAGE,
+            login_args=("login",),
+            auth_hint="run `dsh-acp login` or set DEEPSEEK_API_KEY",
+            min_version="0.4.6",
+        ),
+        args=(),
+        aliases=("deepseek" + "-harness", "dsh"),
+        env_passthrough=("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DSH_HOME", "DSH_PATH"),
+    ),
     # Grok Build (xAI's ``grok`` CLI) drives ``grok agent stdio``. Ships via a
     # curl installer (not npm) and authenticates through its own ``grok login``
     # (xAI OAuth, device-code capable) or ``XAI_API_KEY``; Omnigent stores no

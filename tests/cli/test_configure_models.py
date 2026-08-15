@@ -1700,6 +1700,7 @@ def test_overview_lists_all_harnesses_in_priority_order(isolated_config, monkeyp
         "Goose",
         # Builtin ACP CLI rows (ACP_CLI_HARNESSES) render after Goose, the other
         # ACP-family builtin, and before the non-ACP harnesses.
+        "DeepSeek Harness",
         "Grok Build",
         "Copilot",
         "Kiro",
@@ -2058,13 +2059,13 @@ def test_overview_truncates_long_status_for_narrow_terminal(isolated_config, mon
         ("5", "_manage_hermes_harness"),
         ("8", "_manage_qwen_harness"),
         ("9", "_manage_goose_harness"),
-        # 10 is the builtin ACP CLI row (Grok Build); every row after it shifted
-        # down by one when that block landed.
+        # 10 and 11 are the builtin ACP CLI rows (DeepSeek Harness and Grok Build).
         ("10", "_show_acp_cli_harness"),
-        ("11", "_manage_copilot_harness"),
-        ("12", "_manage_kiro_harness"),
-        ("13", "_manage_kimi_harness"),
-        ("15", "_add_acp_agent"),
+        ("11", "_show_acp_cli_harness"),
+        ("12", "_manage_copilot_harness"),
+        ("13", "_manage_kiro_harness"),
+        ("14", "_manage_kimi_harness"),
+        ("16", "_add_acp_agent"),
     ],
 )
 def test_overview_dispatches_to_correct_manager(
