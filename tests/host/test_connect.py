@@ -4000,6 +4000,7 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
     original_popen = subprocess.Popen
     spawned: list[subprocess.Popen[bytes]] = []
     spawn_started = threading.Event()
+    spawn_can_return = threading.Event()
 
     def _slow_popen(args: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
         """Spawn a long-lived process, signalling once it exists.
@@ -4015,6 +4016,7 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
         )
         spawned.append(proc)
         spawn_started.set()
+        spawn_can_return.wait(10.0)
         return proc
 
     frame = HostLaunchRunnerFrame(
@@ -4026,11 +4028,16 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
     with patch("omnigent.host.connect.subprocess.Popen", side_effect=_slow_popen):
         task = asyncio.create_task(host._handle_launch(frame))
         # Cancel only once the spawn thread has actually created the process,
-        # so we exercise the real leak window rather than a pre-spawn cancel.
-        await asyncio.to_thread(spawn_started.wait, 10.0)
+        # but before the spawn future can return to _handle_launch, so we
+        # exercise the real leak window rather than a pre-spawn or post-spawn
+        # cancel.
+        assert await asyncio.to_thread(spawn_started.wait, 10.0)
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            spawn_can_return.set()
 
     assert spawned, "the spawn thread should have created a process"
     # Never registered (that is the leak window) ...

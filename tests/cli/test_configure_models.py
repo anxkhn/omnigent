@@ -12,9 +12,10 @@ add/set-default/remove write paths surfaces here rather than silently.
 harness on a single compact row — the name on the left, then an aligned
 ``✓``/``✗`` status column — in 0.3 priority order: ``1=Claude``,
 ``2=Codex``, ``3=Cursor``, ``4=OpenCode``, ``5=Hermes``, ``6=Pi``,
-``7=Antigravity``, ``8=Qwen Code``, ``9=Goose``, ``10=Copilot``, ``11=Kiro``,
-``12=Kimi Code``, ``13=Import from OpenClaw``, ``14=Custom ACP agent``,
-``15=Quit``. There is no "More" folding — every harness is visible at once —
+``7=Antigravity``, ``8=Qwen Code``, ``9=Goose``, ``10=DeepSeek Harness``,
+``11=Grok Build``, ``12=Copilot``, ``13=Kiro``, ``14=Kimi Code``,
+``15=Import from OpenClaw``, ``16=Custom ACP agent``, ``17=Quit``. There is
+no "More" folding — every harness is visible at once —
 and the actionable hint (install command / next step)
 renders only for the highlighted row, as the selector's description line.
 Selecting a harness drills into level 2 — its configured credentials, then ``+ Add a
@@ -64,6 +65,9 @@ from omnigent.onboarding.provider_config import (
     load_config,
     load_providers,
 )
+
+
+OPENCLAW_IMPORT_CHOICE = "15"
 
 
 @pytest.fixture()
@@ -1829,7 +1833,7 @@ def test_setup_imports_openclaw_agents(isolated_config) -> None:
         encoding="utf-8",
     )
 
-    stdin = "\n".join(["14", "", "", "q"]) + "\n"
+    stdin = "\n".join([OPENCLAW_IMPORT_CHOICE, "", "", "q"]) + "\n"
     result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
 
     assert result.exit_code == 0, result.output
@@ -1851,7 +1855,7 @@ def test_setup_imports_openclaw_agents_from_user_selected_path(isolated_config) 
         encoding="utf-8",
     )
 
-    stdin = "\n".join(["14", "", str(selected), "", "q"]) + "\n"
+    stdin = "\n".join([OPENCLAW_IMPORT_CHOICE, "", str(selected), "", "q"]) + "\n"
     result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
 
     assert result.exit_code == 0, result.output
@@ -1868,7 +1872,7 @@ def test_setup_rejects_user_selected_unrelated_file(isolated_config) -> None:
     selected = isolated_config / "package.json"
     selected.write_text('{"name": "unrelated"}', encoding="utf-8")
 
-    stdin = "\n".join(["14", "", str(selected), "2", "q"]) + "\n"
+    stdin = "\n".join([OPENCLAW_IMPORT_CHOICE, "", str(selected), "2", "q"]) + "\n"
     result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
 
     assert result.exit_code == 0, result.output
