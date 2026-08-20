@@ -75,6 +75,7 @@ import importlib.util
 import json
 import logging
 import os
+import platform
 import re
 import ssl
 import threading
@@ -92,6 +93,8 @@ _logger = logging.getLogger(__name__)
 ENGINE_ENV = "OMNIGENT_DICTATION_ENGINE"
 MODEL_DIR_ENV = "OMNIGENT_DICTATION_MODEL_DIR"
 PUNCT_DIR_ENV = "OMNIGENT_DICTATION_PUNCT_DIR"
+MODEL_ENV = "OMNIGENT_DICTATION_MODEL"
+MODEL_CACHE_DIR_ENV = "OMNIGENT_DICTATION_MODEL_CACHE_DIR"
 MAX_STREAMS_ENV = "OMNIGENT_DICTATION_MAX_STREAMS"
 MAX_FRAME_BYTES_ENV = "OMNIGENT_DICTATION_MAX_FRAME_BYTES"
 MAX_TAKE_SECONDS_ENV = "OMNIGENT_DICTATION_MAX_TAKE_SECONDS"
@@ -102,12 +105,12 @@ WORKER_TOKEN_ENV = "OMNIGENT_DICTATION_WORKER_TOKEN"
 REMOTE_CA_FILE_ENV = "OMNIGENT_DICTATION_REMOTE_CA_FILE"
 ALLOW_INSECURE_REMOTE_ENV = "OMNIGENT_DICTATION_ALLOW_INSECURE_REMOTE"
 
-#: Built-in engine names. The default (empty ``OMNIGENT_DICTATION_ENGINE``)
-#: resolves to the sherpa engine.
+#: Built-in engine names. An empty ``OMNIGENT_DICTATION_ENGINE`` prefers
+#: Parakeet MLX when installed on Apple Silicon, then falls back to sherpa.
 ENGINE_SHERPA = "sherpa"
+ENGINE_PARAKEET_MLX = "parakeet_mlx"
 ENGINE_FAKE = "fake"
 ENGINE_REMOTE = "remote"
-_DEFAULT_ENGINE = ENGINE_SHERPA
 
 #: Worker handshake budget: covers a cold model load on the worker side.
 _REMOTE_READY_TIMEOUT_S = 30.0
@@ -120,6 +123,7 @@ _BYTES_PER_SECOND = SAMPLE_RATE * 2
 #: Stable machine-readable unavailability reasons.
 REASON_EXTRA_NOT_INSTALLED = "extra_not_installed"
 REASON_MODELS_MISSING = "models_missing"
+REASON_UNSUPPORTED_PLATFORM = "unsupported_platform"
 REASON_UNKNOWN_ENGINE = "unknown_engine"
 REASON_REMOTE_URL_MISSING = "remote_url_missing"
 REASON_REMOTE_TOKEN_MISSING = "remote_token_missing"
@@ -136,6 +140,11 @@ DEFAULT_MAX_TAKE_SECONDS = 300.0
 _RULE1_MIN_TRAILING_SILENCE_S = 3.5
 _RULE2_MIN_TRAILING_SILENCE_S = 1.6
 _RULE3_MIN_UTTERANCE_LENGTH_S = 30.0
+
+_DEFAULT_MLX_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
+_MLX_CONTEXT_SIZE = (256, 16)
+_MLX_SPEECH_RMS = 0.01
+_MLX_VAD_WINDOW_SAMPLES = SAMPLE_RATE // 10
 
 _PUNCT_STRIP_RE = re.compile(r"[.,?!:;…]+")
 
@@ -243,6 +252,15 @@ def _punct_dir() -> Path:
     return Path(os.environ.get(PUNCT_DIR_ENV) or default).expanduser()
 
 
+def _mlx_model() -> str:
+    return os.environ.get(MODEL_ENV, "").strip() or _DEFAULT_MLX_MODEL
+
+
+def _mlx_cache_dir() -> Path:
+    default = Path.home() / ".omnigent" / "models" / "dictation" / "parakeet-mlx"
+    return Path(os.environ.get(MODEL_CACHE_DIR_ENV) or default).expanduser()
+
+
 def max_streams() -> int:
     """Concurrent dictation connections allowed (decode is CPU-bound)."""
     raw = os.environ.get(MAX_STREAMS_ENV, "")
@@ -321,9 +339,30 @@ def _sherpa_available() -> tuple[bool, str | None]:
     return True, None
 
 
+def _parakeet_mlx_available() -> tuple[bool, str | None]:
+    """Availability probe for the Apple Silicon MLX engine (loads nothing)."""
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return False, REASON_UNSUPPORTED_PLATFORM
+    if importlib.util.find_spec("parakeet_mlx") is None:
+        return False, REASON_EXTRA_NOT_INSTALLED
+    model = Path(_mlx_model()).expanduser()
+    if model.is_absolute() and not model.is_dir():
+        return False, REASON_MODELS_MISSING
+    return True, None
+
+
 def _selected_engine_name() -> str:
-    """Resolve the configured engine name (default: sherpa)."""
-    return os.environ.get(ENGINE_ENV, "").strip() or _DEFAULT_ENGINE
+    """Resolve an explicit engine or the best installed local default."""
+    configured = os.environ.get(ENGINE_ENV, "").strip()
+    if configured:
+        return configured
+    if (
+        platform.system() == "Darwin"
+        and platform.machine() == "arm64"
+        and importlib.util.find_spec("parakeet_mlx") is not None
+    ):
+        return ENGINE_PARAKEET_MLX
+    return ENGINE_SHERPA
 
 
 def engine_availability() -> tuple[bool, str | None]:
@@ -344,6 +383,7 @@ def engine_availability() -> tuple[bool, str | None]:
 _STATUS_ACTIONS = {
     REASON_EXTRA_NOT_INSTALLED: "Install the dictation extra.",
     REASON_MODELS_MISSING: "Install or configure the dictation ASR model files.",
+    REASON_UNSUPPORTED_PLATFORM: "Use the MLX engine on an Apple Silicon Mac.",
     REASON_UNKNOWN_ENGINE: "Set a registered dictation engine name.",
     REASON_REMOTE_URL_MISSING: "Set the remote worker WebSocket URL.",
     REASON_REMOTE_TOKEN_MISSING: "Set the shared dictation worker token.",
@@ -367,6 +407,8 @@ def engine_status() -> dict[str, object]:
             "max_take_seconds": max_take_seconds(),
         },
     }
+    if name == ENGINE_PARAKEET_MLX and reason == REASON_EXTRA_NOT_INSTALLED:
+        result["action"] = "Install the dictation-mlx extra."
     if name == ENGINE_REMOTE:
         url = _remote_url()
         parsed = urlsplit(url)
@@ -377,6 +419,9 @@ def engine_status() -> dict[str, object]:
             "fallback_available": _sherpa_available()[0],
             "connection_state": _get_remote_connection_state(),
         }
+    elif name == ENGINE_PARAKEET_MLX:
+        model = _mlx_model()
+        result["model"] = "local" if Path(model).expanduser().is_absolute() else model
     return result
 
 
@@ -561,6 +606,169 @@ class _SherpaStream:
 
     def close(self) -> None:
         """No-op: the recognizer stream frees with the handle."""
+
+
+class ParakeetMlxDictationEngine:
+    """Apple Silicon streaming transcription through parakeet-mlx."""
+
+    def __init__(self, model_id: str, cache_dir: Path) -> None:
+        if platform.system() != "Darwin" or platform.machine() != "arm64":
+            raise RuntimeError("Parakeet MLX dictation requires an Apple Silicon Mac")
+        from parakeet_mlx import from_pretrained  # type: ignore[import-not-found]
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        model_label = "local model" if Path(model_id).expanduser().is_absolute() else model_id
+        _logger.info("Loading Parakeet MLX dictation model %s", model_label)
+        self._model = from_pretrained(model_id, cache_dir=cache_dir)
+        sample_rate = int(self._model.preprocessor_config.sample_rate)
+        if sample_rate != SAMPLE_RATE:
+            raise RuntimeError(
+                f"Parakeet MLX model sample rate must be {SAMPLE_RATE}, got {sample_rate}"
+            )
+        self._model.encoder.set_attention_model("rel_pos_local_attn", _MLX_CONTEXT_SIZE)
+        self._hop_length = int(self._model.preprocessor_config.hop_length)
+        self._flush_samples = (
+            _MLX_CONTEXT_SIZE[1]
+            * int(self._model.encoder_config.subsampling_factor)
+            * self._hop_length
+        )
+        self._lock = threading.Lock()
+
+    def create_stream(self) -> _ParakeetMlxStream:
+        """Open a streaming Parakeet decoder for one connection."""
+        return _ParakeetMlxStream(self)
+
+
+class _ParakeetMlxStream:
+    """Per-take Parakeet stream with Omnigent-owned utterance endpointing."""
+
+    def __init__(self, engine: ParakeetMlxDictationEngine) -> None:
+        self._engine = engine
+        self._transcriber: Any = None
+        self._utterance_samples = 0
+        self._silence_samples = 0
+        self._speech_seen = False
+        self._pending_pcm = b""
+        self._pending: Any = None
+        self._vad_pending: Any = None
+        self._closed = False
+        self._open_transcriber()
+
+    def _open_transcriber(self) -> None:
+        context = self._engine._model.transcribe_stream(
+            context_size=_MLX_CONTEXT_SIZE,
+            keep_original_attention=True,
+        )
+        self._transcriber = context.__enter__()
+
+    def _close_transcriber(self) -> None:
+        if self._transcriber is not None:
+            self._transcriber.__exit__(None, None, None)
+            self._transcriber = None
+
+    def _text(self) -> str:
+        return str(self._transcriber.result.text).strip()
+
+    def _add_audio(self, samples: Any, *, flush: bool = False) -> None:
+        import mlx.core as mx  # type: ignore[import-not-found]
+        import numpy as np
+
+        pending = samples if self._pending is None else np.concatenate((self._pending, samples))
+        usable = (
+            len(pending) if flush else len(pending) - (len(pending) % self._engine._hop_length)
+        )
+        if usable:
+            self._transcriber.add_audio(mx.array(pending[:usable]))
+        self._pending = pending[usable:]
+
+    def _feed_window(self, samples: Any) -> str | None:
+        import numpy as np
+
+        self._add_audio(samples)
+        self._utterance_samples += int(samples.size)
+        rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+        if rms >= _MLX_SPEECH_RMS:
+            self._speech_seen = True
+            self._silence_samples = 0
+        elif self._speech_seen:
+            self._silence_samples += int(samples.size)
+
+        silence_endpoint = self._speech_seen and self._silence_samples >= int(
+            _RULE2_MIN_TRAILING_SILENCE_S * SAMPLE_RATE
+        )
+        duration_endpoint = self._utterance_samples >= int(
+            _RULE3_MIN_UTTERANCE_LENGTH_S * SAMPLE_RATE
+        )
+        if not silence_endpoint and not duration_endpoint:
+            return None
+        if duration_endpoint and not silence_endpoint:
+            silence = np.zeros(self._engine._flush_samples, dtype=np.float32)
+            self._add_audio(silence, flush=True)
+        text = self._text()
+        self._close_transcriber()
+        self._open_transcriber()
+        self._utterance_samples = 0
+        self._silence_samples = 0
+        self._speech_seen = False
+        self._pending = None
+        return text or None
+
+    def feed_pcm16(self, data: bytes) -> DictationUpdate:
+        """Decode PCM and finalize only at an utterance endpoint."""
+        import numpy as np
+
+        pcm = self._pending_pcm + data
+        usable = len(pcm) - (len(pcm) % 2)
+        self._pending_pcm = pcm[usable:]
+        if usable <= 0:
+            return DictationUpdate(partial=self._text())
+        samples = np.frombuffer(pcm[:usable], dtype="<i2").astype(np.float32) / 32768.0
+
+        with self._engine._lock:
+            pending = (
+                samples
+                if self._vad_pending is None
+                else np.concatenate((self._vad_pending, samples))
+            )
+            finals: list[str] = []
+            offset = 0
+            while len(pending) - offset >= _MLX_VAD_WINDOW_SAMPLES:
+                finalized = self._feed_window(pending[offset : offset + _MLX_VAD_WINDOW_SAMPLES])
+                if finalized:
+                    finals.append(finalized)
+                offset += _MLX_VAD_WINDOW_SAMPLES
+            self._vad_pending = pending[offset:]
+            return DictationUpdate(
+                partial=self._text(),
+                finalized=" ".join(finals).strip() or None,
+            )
+
+    def finish(self) -> str:
+        """Flush right context with silence and return one final tail."""
+        if self._closed:
+            return ""
+        import numpy as np
+
+        with self._engine._lock:
+            if self._vad_pending is not None and len(self._vad_pending):
+                self._add_audio(self._vad_pending)
+                self._utterance_samples += len(self._vad_pending)
+                self._vad_pending = None
+            if self._utterance_samples:
+                silence = np.zeros(self._engine._flush_samples, dtype=np.float32)
+                self._add_audio(silence, flush=True)
+            text = self._text()
+            self._close_transcriber()
+            self._closed = True
+            return text
+
+    def close(self) -> None:
+        """Release MLX stream state without flushing."""
+        if self._closed:
+            return
+        with self._engine._lock:
+            self._close_transcriber()
+            self._closed = True
 
 
 class RemoteDictationEngine:
@@ -890,6 +1098,11 @@ register_engine(
     ENGINE_SHERPA,
     lambda: SherpaDictationEngine(_asr_dir(), _punct_dir()),
     available=_sherpa_available,
+)
+register_engine(
+    ENGINE_PARAKEET_MLX,
+    lambda: ParakeetMlxDictationEngine(_mlx_model(), _mlx_cache_dir()),
+    available=_parakeet_mlx_available,
 )
 register_engine(ENGINE_REMOTE, _build_remote_engine, available=_remote_available)
 register_engine(ENGINE_FAKE, FakeDictationEngine)
