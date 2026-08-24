@@ -40,8 +40,6 @@ from dataclasses import dataclass
 
 from omnigent.harness_install_spec import HarnessInstallSpec
 
-_DEEPSEEK_ACP_PACKAGE = "@openma/" + "deepseek" + "-harness-acp"
-
 
 @dataclass(frozen=True)
 class AcpCliHarness:
@@ -90,13 +88,13 @@ ACP_CLI_HARNESSES: dict[str, AcpCliHarness] = {
         install=HarnessInstallSpec(
             "DeepSeek Harness",
             "dsh-acp",
-            _DEEPSEEK_ACP_PACKAGE,
+            "@openma/deepseek-harness-acp",
             login_args=("login",),
             auth_hint="run `dsh-acp login` or set DEEPSEEK_API_KEY",
             min_version="0.4.6",
         ),
         args=(),
-        aliases=("deepseek" + "-harness", "dsh"),
+        aliases=("deepseek-harness", "dsh"),
         env_passthrough=("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DSH_HOME", "DSH_PATH"),
     ),
     # Devin (Cognition's ``devin`` CLI) drives ``devin acp`` — its ACP stdio
