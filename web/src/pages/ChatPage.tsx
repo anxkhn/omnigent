@@ -3025,11 +3025,15 @@ function ComposerImpl({
           lines.push("No usage data yet — send a message first.");
         }
         lines.push(`Items in context: ${blocks.length}`);
+        dirtyRef.current = true;
+        setValue("");
         setCommandError(lines.join("\n"));
         return true;
       }
       case "/help": {
         const lines = Object.entries(slashCommands).map(([name, desc]) => `${name} — ${desc}`);
+        dirtyRef.current = true;
+        setValue("");
         setCommandError(lines.join("\n"));
         return true;
       }
@@ -3457,6 +3461,19 @@ function ComposerImpl({
             commands={slashCommands}
           />
         )}
+        {/* Float command output so a long /help listing cannot grow the card
+            up into the ChatHeader overlay (absolute z-30, unpainted). */}
+        {commandError !== null && (
+          <div
+            data-testid="composer-command-output"
+            role="status"
+            className="absolute inset-x-0 bottom-full z-20 mb-2 max-h-64 overflow-y-auto overscroll-contain rounded-[12px] border border-border bg-popover px-3 py-2 shadow-menu"
+          >
+            <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">
+              {commandError}
+            </p>
+          </div>
+        )}
         {/* "@"-file-mention browser — native coding-agent sessions only.
             Also shown (as a loading row) while the listing is still fetching,
             so "@" isn't silently dead during runner cold-boot or a drill-in. */}
@@ -3662,12 +3679,6 @@ function ComposerImpl({
                 </button>
               </span>
             ))}
-          </div>
-        )}
-        {/* Inline slash-command feedback: errors and /help output */}
-        {commandError !== null && (
-          <div className="px-4 pb-2 text-sm text-muted-foreground whitespace-pre-wrap">
-            {commandError}
           </div>
         )}
         <div className="flex items-center justify-between gap-2 px-2 pb-2">

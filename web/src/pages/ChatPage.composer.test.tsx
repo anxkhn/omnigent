@@ -599,6 +599,23 @@ describe("Composer slash-command submit routing", () => {
     expect(onSend).toHaveBeenCalledWith("/not-a-real-skill", undefined);
   });
 
+  it("floats /help output above the composer in a capped scroll panel", () => {
+    // Long skill blurbs used to dump into the composer card and grow it
+    // under the ChatHeader overlay. The listing must float, stay capped,
+    // and scroll leftovers instead of stretching the card.
+    render(<Composer {...composerProps({ onSendSlashCommand: vi.fn() })} />);
+    const ta = textarea();
+    fireEvent.change(ta, { target: { value: "/help" } });
+    fireEvent.keyDown(ta, { key: "Enter" });
+
+    const output = screen.getByTestId("composer-command-output");
+    expect(output).toHaveTextContent("/help — Show available slash commands");
+    expect(output).toHaveTextContent("/deslop — Remove AI slop");
+    expect(output).toHaveClass("absolute", "max-h-64", "overflow-y-auto");
+    expect(ta.value).toBe("");
+    expect(output.parentElement).toHaveAttribute("data-composer-card");
+  });
+
   it("treats /effort as plaintext when effort controls are hidden", () => {
     const onSend = vi.fn();
     const onSendSlashCommand = vi.fn();
