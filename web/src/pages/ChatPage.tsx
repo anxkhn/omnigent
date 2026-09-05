@@ -226,7 +226,7 @@ import { GoalControl, GoalStatusPill, useGoalState, type Goal } from "@/componen
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { ConnectionIndicator } from "./ChatIndicators";
-import { CHAT_COLUMN_WIDTH } from "./chatLayout";
+import { CHAT_COLUMN_WIDTH, COMPOSER_POPOVER_MAX_H, COMPOSER_POPOVER_Z } from "./chatLayout";
 import { Transcript } from "@/components/chat/Transcript";
 
 /** Server-info as consumers see it: the probe's result, or "loading". */
@@ -2437,7 +2437,8 @@ export function BackgroundTaskPill() {
             style={box ? { width: box.width, height: box.height } : undefined}
             className={cn(
               "absolute bottom-0 left-0 overflow-hidden rounded-2xl bg-card text-sm shadow-sm ring-1 ring-border transition-[width,height,box-shadow] duration-200 ease-out",
-              showCard && "z-10 shadow-menu",
+              showCard &&
+                cn(COMPOSER_POPOVER_Z, COMPOSER_POPOVER_MAX_H, "overflow-y-auto shadow-menu"),
             )}
           >
             <div
@@ -3461,13 +3462,17 @@ function ComposerImpl({
             commands={slashCommands}
           />
         )}
-        {/* Float command output so a long /help listing cannot grow the card
-            up into the ChatHeader overlay (absolute z-30, unpainted). */}
+        {/* /help, /context, and command errors share the composer popover
+            band so they cannot grow into the ChatHeader overlay. */}
         {commandError !== null && (
           <div
             data-testid="composer-command-output"
             role="status"
-            className="absolute inset-x-0 bottom-full z-20 mb-2 max-h-64 overflow-y-auto overscroll-contain rounded-[12px] border border-border bg-popover px-3 py-2 shadow-menu"
+            className={cn(
+              "absolute inset-x-0 bottom-full mb-2 overflow-y-auto overscroll-contain rounded-[12px] border border-border bg-popover px-3 py-2 shadow-menu",
+              COMPOSER_POPOVER_Z,
+              COMPOSER_POPOVER_MAX_H,
+            )}
           >
             <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-muted-foreground">
               {commandError}

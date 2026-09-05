@@ -376,6 +376,7 @@ describe("Composer slash-command menu", () => {
     // Built-ins are inserted first, so "/compact" tops the list and is the
     // default highlight — the crux of the fix (was -1 / nothing selected).
     expect(activeRow()?.textContent).toContain("/compact");
+    expect(activeRow()?.closest(".absolute")).toHaveClass("z-20");
   });
 
   it("Tab completes the highlighted skill into the textarea", () => {
@@ -611,7 +612,7 @@ describe("Composer slash-command submit routing", () => {
     const output = screen.getByTestId("composer-command-output");
     expect(output).toHaveTextContent("/help — Show available slash commands");
     expect(output).toHaveTextContent("/deslop — Remove AI slop");
-    expect(output).toHaveClass("absolute", "max-h-64", "overflow-y-auto");
+    expect(output).toHaveClass("absolute", "z-20", "overflow-y-auto");
     expect(ta.value).toBe("");
     expect(output.parentElement).toHaveAttribute("data-composer-card");
   });
