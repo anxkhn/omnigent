@@ -8,5 +8,10 @@ export const CHAT_COLUMN_WIDTH =
  */
 export const COMPOSER_POPOVER_Z = "z-20";
 
-/** 16rem, or whatever still fits under the header + composer on a short window. */
-export const COMPOSER_POPOVER_MAX_H = "max-h-[min(16rem,calc(100svh-14rem))]";
+/**
+ * Cap at the `max-h-64` step of the spacing scale; on short windows shrink to
+ * what fits above the composer card: viewport minus the header band
+ * (`--omnigent-header-height`) minus the card + gap (~10.5rem).
+ */
+export const COMPOSER_POPOVER_MAX_H =
+  "max-h-[min(--spacing(64),calc(100svh_-_var(--omnigent-header-height)_-_10.5rem))]";

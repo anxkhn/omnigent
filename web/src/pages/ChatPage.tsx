@@ -2978,6 +2978,8 @@ function ComposerImpl({
           const current = sessionModelOverride
             ? `${sessionModelOverride} (override)`
             : (llmModel ?? "agent default");
+          dirtyRef.current = true;
+          setValue("");
           setCommandError(`Model: ${current}\nUsage: /model <name> · /model default to reset`);
           return true;
         }
